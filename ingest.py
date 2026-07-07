@@ -25,6 +25,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# Load .env file if it exists
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ[key.strip()] = val.strip().strip('"').strip("'")
+
 import chromadb
 from google import genai
 from google.genai import types

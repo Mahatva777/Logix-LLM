@@ -56,7 +56,7 @@ from rag_engine import _get_engine, reset_engine, needs_advice_note, needs_consi
 # ARE NOT covered by the 5-stock knowledge base, print c["distance"] for
 # each returned chunk, and set MAX_RELEVANT_DISTANCE just above the
 # "covered" cluster and below the "not covered" cluster.
-MAX_RELEVANT_DISTANCE = 0.55
+MAX_RELEVANT_DISTANCE = 0.75  # Lowered from 0.55 to allow comparison/ranking queries
 
 DISCLAIMER_VARIANTS = [
     "This is general information from our research base, not a personal "

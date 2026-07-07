@@ -27,6 +27,15 @@ import os
 import re
 from pathlib import Path
 
+# Load .env file if it exists
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ[key.strip()] = val.strip().strip('"').strip("'")
+
 import chromadb
 from google import genai
 from google.genai import types
@@ -41,6 +50,9 @@ PERSIST_DIR = "chroma_db"
 COLLECTION_NAME = "stock_research"
 TOP_K_SINGLE = 6      # chunks retrieved when the query targets one ticker (or none)
 TOP_K_PER_TICKER = 4  # chunks retrieved PER ticker when comparing two+
+TOP_K_HINT_EXTRA = 2  # extra unfiltered chunks pulled alongside a page_ticker HINT
+                      # (i.e. no ticker named in the query text) so a relevant
+                      # cross-stock chunk still has a chance to surface
 
 # Known universe for this hackathon build (5-stock scope). Aliases let us
 # detect a ticker even when the user types the company name instead of the
@@ -164,11 +176,22 @@ class RagEngine:
     def retrieve(self, query: str, page_ticker: str = None) -> list:
         """
         Returns a list of dicts: {id, text, metadata}.
-        If the query names one or more tickers explicitly, those take
-        precedence over the page's ticker context and we fetch top_k PER
-        ticker (so a comparison can't get crowded out by one side having
-        more semantically similar chunks). Otherwise we fall back to the
-        page's ticker (if any), or an unfiltered search.
+
+        If the query NAMES one or more tickers explicitly (detect_tickers
+        finds an alias substring in the query text), those take full
+        precedence over page_ticker and we fetch top_k PER ticker -- this
+        already handles "Compare HDFC vs ICICI margins" correctly no
+        matter what page_ticker is passed in, since detected overrides it.
+
+        If the query does NOT name any ticker (e.g. "Which of these IT
+        companies has better margins?" with no company named), page_ticker
+        is used as a HINT, not a hard filter: we still prioritize it with
+        a page_ticker-filtered top_k query, but top up with a small
+        unfiltered query so a genuinely relevant chunk from another stock
+        isn't silently excluded just because the user didn't name it. This
+        is the fix for the "silently restricted to the page's ticker"
+        failure mode -- it only ever applied to this unnamed-ticker case,
+        not to the named-comparison case, which was already correct.
         """
         detected = detect_tickers(query)
         target_tickers = detected if detected else ([page_ticker.upper()] if page_ticker else [])
@@ -183,6 +206,13 @@ class RagEngine:
         elif len(target_tickers) == 1:
             res = self._query_chroma(query, top_k=TOP_K_SINGLE, ticker=target_tickers[0])
             chunks.extend(self._flatten(res, seen_ids))
+            if not detected:
+                # page_ticker is a hint here, not a named request -- top up
+                # with a few unfiltered candidates so a relevant chunk from
+                # another stock can still surface. filter_by_relevance()
+                # downstream will drop it if it isn't actually relevant.
+                res_hint = self._query_chroma(query, top_k=TOP_K_HINT_EXTRA, ticker=None)
+                chunks.extend(self._flatten(res_hint, seen_ids))
         else:
             res = self._query_chroma(query, top_k=TOP_K_SINGLE, ticker=None)
             chunks.extend(self._flatten(res, seen_ids))
@@ -195,11 +225,15 @@ class RagEngine:
         ids = chroma_result.get("ids", [[]])[0]
         docs = chroma_result.get("documents", [[]])[0]
         metas = chroma_result.get("metadatas", [[]])[0]
-        for cid, doc, meta in zip(ids, docs, metas):
+        # Chroma computes this for free on every query; the guardrails
+        # layer's relevance filter needs it, so capture it here rather
+        # than discarding it.
+        dists = chroma_result.get("distances", [[]])[0] or [None] * len(ids)
+        for cid, doc, meta, dist in zip(ids, docs, metas, dists):
             if cid in seen_ids:
                 continue
             seen_ids.add(cid)
-            out.append({"id": cid, "text": doc, "metadata": meta or {}})
+            out.append({"id": cid, "text": doc, "metadata": meta or {}, "distance": dist})
         return out
 
     # -----------------------------------------------------------------
