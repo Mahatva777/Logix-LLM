@@ -1,6 +1,6 @@
-# MoneyLogix 🚀
+# Logix LLM  🚀
 
-MoneyLogix is a **SEBI-compliant, highly constrained AI research assistant** built for the Indian financial sector. It securely analyzes live market data and user portfolios to provide strictly grounded, verifiable research with exact citations — **without giving illegal or unauthorized financial advice**.
+Logix LLM is a **SEBI-compliant, highly constrained AI research assistant** built for the Indian financial sector. It securely analyzes live market data and user portfolios to provide strictly grounded, verifiable research with exact citations — **without giving illegal or unauthorized financial advice**.
 
 > **Why "highly constrained"?** Every AI-generated response passes through a multi-stage guardrail pipeline that validates citations against retrieved context, strips ungrounded speculation, intercepts recommendation-leakage via regex and logical checks, and deterministically injects SEBI-compliant disclaimers — before a single word reaches the user.
 
