@@ -42,7 +42,10 @@ from pydantic import BaseModel
 
 from guardrails import answer_query
 from general_agent import answer_general_query
+from portfolio_engine import answer_portfolio_query
 from thesys_chat import router as thesys_router
+from live_ingest import ingest_ticker_live, ticker_in_collection
+from market_tools import fetch_quote
 
 
 app = FastAPI()
@@ -76,10 +79,28 @@ _TOKEN_RE = re.compile(r"\S+\s*")  # word plus any trailing whitespace
 class ChatRequest(BaseModel):
     query: str
     ticker: str | None = None
+    portfolio: list = []
 
 
 class GeneralChatRequest(BaseModel):
     query: str
+
+
+class PortfolioPosition(BaseModel):
+    ticker: str
+    buy_date: str | None = None
+    buy_price: float
+    quantity: float
+
+
+class PortfolioChatRequest(BaseModel):
+    query: str
+    ticker: str | None = None
+    portfolio: list[PortfolioPosition] = []
+
+
+class IngestRequest(BaseModel):
+    ticker: str
 
 
 def _sse(event: str, data: dict) -> str:
@@ -119,11 +140,11 @@ async def _stream_result(result: dict, include_chart: bool = False):
             yield _sse("chart_data", {"chart_data": chart_data})
 
 
-async def _stream_chat(query: str, ticker: str | None):
+async def _stream_chat(query: str, ticker: str | None, portfolio: list = None):
     try:
         # answer_query() is a blocking call (Chroma + Gemini network I/O);
         # run it off the event loop so other requests aren't stalled.
-        result = await asyncio.to_thread(answer_query, query, ticker)
+        result = await asyncio.to_thread(answer_query, query, ticker, portfolio)
     except Exception as e:
         yield _sse("error", {"detail": str(e)})
         return
@@ -149,7 +170,7 @@ async def _stream_chat_general(query: str):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     return StreamingResponse(
-        _stream_chat(req.query, req.ticker),
+        _stream_chat(req.query, req.ticker, req.portfolio),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -162,6 +183,85 @@ async def chat_general(req: GeneralChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+async def _stream_chat_portfolio(query: str, portfolio: list):
+    """Stream portfolio-aware answers. Accepts any ticker — auto-ingests
+    live yfinance data for tickers not yet in the Chroma collection."""
+    try:
+        # Convert Pydantic models → plain dicts (snake_case keys portfolio_engine expects)
+        portfolio_dicts = [
+            {
+                "ticker":    p.ticker,
+                "buy_date":  p.buy_date,
+                "buy_price": p.buy_price,
+                "quantity":  p.quantity,
+            }
+            for p in portfolio
+        ]
+        result = await asyncio.to_thread(answer_portfolio_query, query, portfolio_dicts)
+    except Exception as e:
+        yield _sse("error", {"detail": str(e)})
+        return
+
+    async for event in _stream_result(result):
+        yield event
+
+    # Also emit guardrail_flags so the frontend can log/display them if desired
+    if result.get("guardrail_flags"):
+        yield _sse("guardrail_flags", {"flags": result["guardrail_flags"]})
+
+
+@app.post("/chat/portfolio")
+async def chat_portfolio(req: PortfolioChatRequest):
+    """Personalized portfolio Q&A. Works for any ticker — live yfinance data
+    is auto-ingested into ChromaDB for tickers not already in the knowledge base."""
+    return StreamingResponse(
+        _stream_chat_portfolio(req.query, req.portfolio),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/api/ingest/ticker")
+async def ingest_ticker(req: IngestRequest):
+    """Trigger a live yfinance ingest for any ticker into ChromaDB.
+    Idempotent — safe to call even if the ticker is already in the DB (upsert).
+    Returns {ticker, chunks_upserted, already_existed}."""
+    ticker = req.ticker.strip().upper()
+    already = ticker_in_collection(ticker)
+    try:
+        n = await asyncio.to_thread(ingest_ticker_live, ticker)
+        return {"ticker": ticker, "chunks_upserted": n, "already_existed": already}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+_PRICE_CACHE = {"data": None, "ts": 0}
+_PRICE_CACHE_TTL = 15  # seconds
+
+CURATED_TICKERS = ["TCS", "HDFC", "ICICI", "INFY", "RELIANCE"]
+
+@app.get("/api/prices")
+async def get_prices():
+    """Returns live INR quotes for the 5 curated stocks. Cached 15s."""
+    import time
+    now = time.time()
+    if _PRICE_CACHE["data"] and (now - _PRICE_CACHE["ts"]) < _PRICE_CACHE_TTL:
+        return _PRICE_CACHE["data"]
+
+    quotes = {}
+    for t in CURATED_TICKERS:
+        try:
+            q = await asyncio.to_thread(fetch_quote, t)
+            quotes[t] = q
+        except Exception:
+            quotes[t] = {"ticker": t, "price": 0, "change": 0, "changePct": 0, "currency": "INR"}
+
+    _PRICE_CACHE["data"] = quotes
+    _PRICE_CACHE["ts"] = now
+    return quotes
+
 
 app.include_router(thesys_router)
 # ---------------------------------------------------------------------------

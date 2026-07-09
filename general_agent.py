@@ -217,7 +217,21 @@ def answer_general_query(query: str) -> dict:
         }
 
     final_message = result["messages"][-1]
-    raw_answer = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
+    content = final_message.content
+
+    # gemini-2.5-flash (thinking model) returns content as a list of parts:
+    # [{'type': 'text', 'text': '...', 'extras': {'signature': '...'}}]
+    # Extract only the actual text parts and join them; ignore thinking/signature blocks.
+    if isinstance(content, list):
+        raw_answer = " ".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+            if not isinstance(part, dict) or part.get("type") == "text"
+        ).strip()
+    elif isinstance(content, str):
+        raw_answer = content
+    else:
+        raw_answer = str(content)
 
     # Reuse guardrails.py's own section parser/rebuilder, so both the
     # curated and general paths produce markdown via the exact same

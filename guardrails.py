@@ -177,7 +177,7 @@ def rebuild_markdown(sections: dict) -> str:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def answer_query(query: str, ticker: str | None = None) -> dict:
+def answer_query(query: str, ticker: str | None = None, portfolio: list = None) -> dict:
     """Guardrailed drop-in replacement for rag_engine.answer_query.
 
     Returns {"answer": str, "sources": [...], "guardrail_flags": [...]}.
@@ -189,6 +189,25 @@ def answer_query(query: str, ticker: str | None = None) -> dict:
     expects_considerations = needs_considerations(query)
 
     engine = _get_engine()
+
+    try:
+        from portfolio_engine import extract_tickers
+        from live_ingest import ingest_ticker_live
+        from rag_engine import tickers_in_collection
+        
+        found_tickers = extract_tickers(query)
+        if ticker and ticker not in found_tickers:
+            found_tickers.append(ticker)
+            
+        known = tickers_in_collection()
+        for t in found_tickers:
+            if t not in known and f"{t}.NS" not in known:
+                try:
+                    ingest_ticker_live(t)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # ---- [1] retrieval (unchanged) ----
     # Self-healing: if Chroma raises a tenant/connection error (happens when
@@ -240,7 +259,7 @@ def answer_query(query: str, ticker: str | None = None) -> dict:
 
     # ---- [3] generation (unchanged) ----
     try:
-        raw_answer = engine._generate(query, chunks)
+        raw_answer = engine._generate(query, chunks, portfolio=portfolio)
     except Exception as e:
         return {
             "answer": f"**Answer**\nI retrieved relevant context but generation failed ({e}). Please try again.",

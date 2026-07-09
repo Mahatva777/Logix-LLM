@@ -32,23 +32,56 @@ import yfinance as yf
 
 
 # ---------------------------------------------------------------------------
+# Indian NSE ticker normalization — the root cause of the ₹ vs $ mismatch.
+# yfinance uses the ".NS" suffix for NSE-listed stocks. Without it, it may
+# resolve to a different exchange (often USD-denominated) or fail entirely.
+# ---------------------------------------------------------------------------
+
+_KNOWN_NSE_TICKERS = {
+    "TCS", "HDFC", "HDFCBANK", "ICICI", "ICICIBANK", "INFY", "INFOSYS",
+    "RELIANCE", "WIPRO", "SBIN", "BHARTIARTL", "TATAMOTORS", "TATASTEEL",
+    "ITC", "LT", "HCLTECH", "SUNPHARMA", "BAJFINANCE", "MARUTI", "ASIANPAINT",
+    "NESTLEIND", "ULTRACEMCO", "TECHM", "POWERGRID", "NTPC", "ONGC",
+    "ADANIENT", "ADANIPORTS", "COALINDIA", "JSWSTEEL", "TITAN", "AXISBANK",
+    "KOTAKBANK", "BAJAJFINSV", "INDUSINDBK", "DRREDDY", "CIPLA", "GRASIM",
+    "DIVISLAB", "HEROMOTOCO", "EICHERMOT", "APOLLOHOSP", "BPCL", "HINDALCO",
+    "M&M", "BRITANNIA", "ZOMATO", "PAYTM", "NYKAA",
+}
+
+def _ensure_ns(ticker: str) -> str:
+    """Append .NS if this looks like a bare Indian NSE ticker."""
+    t = ticker.strip().upper()
+    if t.endswith(".NS") or t.endswith(".BO"):
+        return t
+    if "." in t:
+        return t  # already has an exchange suffix (e.g. AAPL)
+    if t in _KNOWN_NSE_TICKERS:
+        return f"{t}.NS"
+    # Heuristic: if it's all uppercase and no dots, try .NS first
+    # For unknown tickers, caller can pass "AAPL" and it stays as-is
+    return t
+
+
+# ---------------------------------------------------------------------------
 # Plain data-fetch helpers -- the single source of truth for the yfinance
 # calls. JSON-serializable returns only (no raw DataFrames/Series/numpy
 # scalars escaping this module).
 # ---------------------------------------------------------------------------
 
 def fetch_price(ticker: str) -> float:
-    """Returns the most recent closing price for `ticker`."""
-    stock = yf.Ticker(ticker)
+    """Returns the most recent closing price for `ticker` (INR for NSE stocks)."""
+    ns_ticker = _ensure_ns(ticker)
+    stock = yf.Ticker(ns_ticker)
     hist = stock.history()
     if hist.empty:
-        raise ValueError(f"No price data found for ticker '{ticker}'.")
+        raise ValueError(f"No price data found for ticker '{ticker}' (tried '{ns_ticker}').")
     return float(hist["Close"].iloc[-1])
 
 
 def fetch_historical_prices(ticker: str, start_date: str, end_date: str) -> dict:
     """Returns {"ticker": "<TICKER>", "series": [{"date": "YYYY-MM-DD", "close": float}, ...]}."""
-    stock = yf.Ticker(ticker)
+    ns_ticker = _ensure_ns(ticker)
+    stock = yf.Ticker(ns_ticker)
     hist = stock.history(start=start_date, end=end_date)
     if hist.empty:
         return {"ticker": ticker.upper(), "series": []}
@@ -61,7 +94,8 @@ def fetch_historical_prices(ticker: str, start_date: str, end_date: str) -> dict
 
 def fetch_balance_sheet(ticker: str) -> dict:
     """Returns the most recent balance sheet as {line_item: {period_end_date: value}}."""
-    stock = yf.Ticker(ticker)
+    ns_ticker = _ensure_ns(ticker)
+    stock = yf.Ticker(ns_ticker)
     df = stock.balance_sheet
     if df is None or df.empty:
         return {}
@@ -71,8 +105,29 @@ def fetch_balance_sheet(ticker: str) -> dict:
 
 def fetch_news(ticker: str) -> list:
     """Returns yfinance's recent news list for `ticker` (empty list if none)."""
-    stock = yf.Ticker(ticker)
+    ns_ticker = _ensure_ns(ticker)
+    stock = yf.Ticker(ns_ticker)
     return stock.news or []
+
+
+def fetch_quote(ticker: str) -> dict:
+    """Returns {ticker, price, change, changePct, currency} for live display."""
+    ns_ticker = _ensure_ns(ticker)
+    stock = yf.Ticker(ns_ticker)
+    hist = stock.history(period="5d")
+    if hist.empty or len(hist) < 1:
+        raise ValueError(f"No data for {ticker}")
+    current = float(hist["Close"].iloc[-1])
+    prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else current
+    change = round(current - prev, 2)
+    change_pct = round((change / prev) * 100, 2) if prev else 0.0
+    return {
+        "ticker": ticker.strip().upper(),
+        "price": round(current, 2),
+        "change": change,
+        "changePct": change_pct,
+        "currency": "INR" if ns_ticker.endswith(".NS") else "USD",
+    }
 
 
 # ---------------------------------------------------------------------------

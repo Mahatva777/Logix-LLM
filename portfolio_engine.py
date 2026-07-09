@@ -103,7 +103,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 
-from rag_engine import _get_engine, reset_engine, TOP_K_PER_TICKER
+from rag_engine import _get_engine, reset_engine, TOP_K_PER_TICKER, tickers_in_collection
 from guardrails import (
     filter_by_relevance,
     split_sections,
@@ -112,6 +112,7 @@ from guardrails import (
     pick_disclaimer,
 )
 from market_tools import fetch_price, fetch_historical_prices
+from live_ingest import ingest_ticker_live, ticker_in_collection
 
 # ---------------------------------------------------------------------------
 # Config
@@ -366,11 +367,11 @@ def _build_events_block(events: list) -> str | None:
 # Step 4 -- prompt + generation
 # ---------------------------------------------------------------------------
 
-PORTFOLIO_SYSTEM_PROMPT = """You are the AI Research Assistant's "My Portfolio" mode on MoneyLogix, answering a logged-in user about their OWN logged holdings in TCS, HDFC Bank, ICICI Bank, Infosys, and/or Reliance.
+PORTFOLIO_SYSTEM_PROMPT = """You are the AI Research Assistant's "My Portfolio" mode on MoneyLogix, answering a logged-in user about their OWN logged holdings across any publicly traded stock.
 
 You are given three kinds of input, and ONLY these:
 (a) POSITION DATA -- pre-computed figures for the user's actual holdings (entry price, current price, P&L, holding period). These numbers are already correct. Copy them exactly as given. Do not perform your own arithmetic on them, do not round them differently, and do not restate a figure you were not given.
-(b) RETRIEVED CONTEXT -- curated research chunks, each labeled with its source file/section, exactly as in general research mode.
+(b) RETRIEVED CONTEXT -- research chunks from the knowledge base (curated docs or live yfinance data), each labeled with its source file/section.
 (c) NOTABLE EVENTS (optional) -- dated coincidences between a price move during the user's holding period and retrieved coverage, if any were found. Treat these strictly as dated facts.
 
 Hard rules:
@@ -508,6 +509,23 @@ def answer_portfolio_query(query: str, portfolio: list) -> dict:
     tickers = [p["ticker"] for p in positions]
     position_block = _build_position_block(positions)
     whitelist = _numeric_whitelist(positions)
+
+    # ---- [1b] auto-ingest any tickers not yet in Chroma -------------------------
+    # For portfolio tickers outside the curated 5 (or any ticker with no DB data),
+    # pull live yfinance data and upsert it so retrieval has something to work with.
+    # This is best-effort: if it fails, we proceed with whatever is already in the DB.
+    known_tickers = tickers_in_collection()
+    for t in tickers:
+        # Match both plain ("TCS") and suffixed ("TCS.NS") forms
+        base = t.split(".")[0]
+        if t not in known_tickers and base not in known_tickers:
+            try:
+                n = ingest_ticker_live(t)
+                flags.append({"stage": "live-ingest", "type": "info",
+                              "detail": f"Live-ingested {t} ({n} chunks) from Yahoo Finance."})
+            except Exception as e:
+                flags.append({"stage": "live-ingest", "type": "warn",
+                              "detail": f"Live ingest for {t} failed: {e}. Proceeding with existing DB data."})
 
     # ---- [2] curated retrieval, per held ticker (same Chroma path as rag_engine) ----
     try:

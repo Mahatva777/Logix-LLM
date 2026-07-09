@@ -258,11 +258,19 @@ class RagEngine:
             ))
         return "\n\n".join(blocks)
 
-    def _generate(self, query: str, chunks: list) -> str:
+    def _generate(self, query: str, chunks: list, portfolio: list = None) -> str:
         context_block = self._build_context_block(chunks)
+        
+        portfolio_str = ""
+        if portfolio:
+            portfolio_str = "\n\nUser's Current Portfolio Context:\n"
+            for p in portfolio:
+                portfolio_str += f"- {p.get('ticker')}: {p.get('quantity')} shares bought at ₹{p.get('buy_price')} on {p.get('buy_date')}\n"
+            portfolio_str += "\nUse this portfolio context ONLY if the user's question references their holdings or asks for a comparison against them."
+
         user_prompt = USER_PROMPT_TEMPLATE.format(
             num_chunks=len(chunks), context_block=context_block, query=query
-        )
+        ) + portfolio_str
         response = self.client.models.generate_content(
             model=GENERATION_MODEL,
             contents=user_prompt,
@@ -287,7 +295,27 @@ class RagEngine:
             sources.append({"file": meta.get("filename", "unknown"), "snippet": snippet})
         return sources
 
-    def answer_query(self, query: str, ticker: str = None) -> dict:
+    def answer_query(self, query: str, ticker: str = None, portfolio: list = None) -> dict:
+        import re
+        from live_ingest import ingest_ticker_live
+        from portfolio_engine import extract_tickers
+        
+        try:
+            # 1. Live ingestion hook: extract tickers and fetch live data
+            found_tickers = extract_tickers(query)
+            if ticker and ticker not in found_tickers:
+                found_tickers.append(ticker)
+                
+            known = self.tickers_in_collection()
+            for t in found_tickers:
+                if t not in known and f"{t}.NS" not in known:
+                    try:
+                        ingest_ticker_live(t)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         try:
             chunks = self.retrieve(query, page_ticker=ticker)
         except Exception as e:
@@ -303,7 +331,7 @@ class RagEngine:
             }
 
         try:
-            answer_text = self._generate(query, chunks)
+            raw_answer = self._generate(query, chunks, portfolio=portfolio)
         except Exception as e:
             return {
                 "answer": f"**Answer**\nI retrieved relevant context but generation failed ({e}). "
@@ -311,7 +339,7 @@ class RagEngine:
                 "sources": self._build_sources(chunks),
             }
 
-        return {"answer": answer_text, "sources": self._build_sources(chunks)}
+        return {"answer": raw_answer, "sources": self._build_sources(chunks)}
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +364,7 @@ def _get_engine() -> RagEngine:
     return _engine
 
 
-def answer_query(query: str, ticker: str | None = None) -> dict:
+def answer_query(query: str, ticker: str | None = None, portfolio: list = None) -> dict:
     """
     Answers a natural-language question about a stock, grounded via RAG.
 
@@ -347,14 +375,39 @@ def answer_query(query: str, ticker: str | None = None) -> dict:
                 (e.g. "TCS"), or None if there's no page context. This is a
                 *default* filter — if the query text itself names one or
                 more tickers, those take precedence (see retrieve()).
+        portfolio: optional portfolio context to inject into the answer.
 
     Returns:
         {"answer": <markdown str with Answer/Considerations/Note sections>,
          "sources": [{"file": <filename>, "snippet": <chunk excerpt>}, ...]}
     """
     engine = _get_engine()
-    return engine.answer_query(query, ticker=ticker)
+    return engine.answer_query(query, ticker=ticker, portfolio=portfolio)
 
+
+def tickers_in_collection() -> set:
+    """
+    Returns the set of ticker symbols that currently have at least one chunk
+    in the Chroma collection. Used by portfolio_engine to decide whether a
+    live yfinance ingest is needed before running retrieval for a ticker.
+
+    Returns an empty set on any error (fails gracefully so callers don't need
+    to handle exceptions from this utility function).
+    """
+    try:
+        engine = _get_engine()
+        # Fetch all stored metadata (ids only, then get metadata separately)
+        # Use a broad get() — Chroma doesn't support SELECT DISTINCT natively,
+        # so we fetch all ticker metadata values and deduplicate in Python.
+        results = engine.collection.get(include=["metadatas"])
+        tickers = {
+            str(m.get("ticker", "")).upper()
+            for m in (results.get("metadatas") or [])
+            if m.get("ticker")
+        }
+        return tickers
+    except Exception:
+        return set()
 
 if __name__ == "__main__":
     import sys

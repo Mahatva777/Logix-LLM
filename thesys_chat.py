@@ -102,7 +102,9 @@ if not THESYS_API_KEY:
         "(the same .env file rag_engine.py reads GEMINI_API_KEY from)."
     )
 
-C1_MODEL = "c1/anthropic/claude-sonnet-4/v-20251230"
+# Free model on Thesys (zero LLM cost). Uses OpenRouter naming — no dots.
+# Alternatives (also free): "c1/google/gemini-3-pro/v-20251230"
+C1_MODEL = "c1/google/gemini-3.1-pro-free/v-20260331"
 MAX_TOOL_ROUNDS = 5  # hard cap so a runaway tool-call loop can't hang a request
 
 client = OpenAI(api_key=THESYS_API_KEY, base_url="https://api.thesys.dev/v1/embed")
@@ -293,10 +295,22 @@ async def _run_and_stream(messages: List[Dict[str, Any]]) -> None:
         completion = client.chat.completions.create(model=C1_MODEL, messages=messages, tools=TOOLS)
 
     # Final phase: stream the UI-generating response for <C1Chat> to render.
-    stream = client.chat.completions.create(model=C1_MODEL, messages=messages, stream=True)
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            await write_content(delta)
+    # The tool loop already exited because `completion` has no further tool
+    # calls — its .message.content IS the final answer. Stream it directly
+    # instead of making a redundant third API call (which could return a
+    # different, potentially malformed response and wastes a C1 API call).
+    final_content = completion.choices[0].message.content or ""
+    if not final_content:
+        # Fallback: ask the model to produce a final answer now that all
+        # tool results are in the message history.
+        stream = client.chat.completions.create(model=C1_MODEL, messages=messages, stream=True)
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                await write_content(delta)
+    else:
+        # Emit the already-resolved content word by word for a streaming feel.
+        for word in final_content.split(" "):
+            await write_content(word + " ")
 
     messages.append({"role": "assistant", "content": get_assistant_message()})
