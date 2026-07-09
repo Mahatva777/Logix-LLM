@@ -41,6 +41,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from guardrails import answer_query
+from general_agent import answer_general_query
+from thesys_chat import router as thesys_router
+
 
 app = FastAPI()
 
@@ -75,12 +78,45 @@ class ChatRequest(BaseModel):
     ticker: str | None = None
 
 
+class GeneralChatRequest(BaseModel):
+    query: str
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _tokenize(text: str) -> list:
     return _TOKEN_RE.findall(text)
+
+
+async def _stream_result(result: dict, include_chart: bool = False):
+    """
+    Shared tail end of both /chat and /chat/general: takes an already-
+    computed {"answer", "sources", ...} dict and streams it as the same
+    token/sources SSE event shape either route was already producing.
+
+    `include_chart` is opt-in (only /chat/general passes True) because
+    only answer_general_query()'s result dict has a "chart_data" key --
+    guardrails.answer_query()'s does not, so checking for the key alone
+    would be an implicit, easy-to-misread way to decide this per-route.
+    """
+    for token in _tokenize(result["answer"]):
+        yield _sse("token", {"token": token})
+        if STREAM_DELAY_SECONDS:
+            await asyncio.sleep(STREAM_DELAY_SECONDS)
+
+    # Sent once, after the full (already-guardrailed) answer has streamed.
+    yield _sse("sources", {"sources": result["sources"]})
+
+    # Sent last, and only if there's actually a chart to show -- omitted
+    # entirely (not sent as null) so the frontend can treat "did I get a
+    # chart_data event at all" as the signal, rather than unpacking a
+    # payload that might be {"chart_data": null}.
+    if include_chart:
+        chart_data = result.get("chart_data")
+        if chart_data:
+            yield _sse("chart_data", {"chart_data": chart_data})
 
 
 async def _stream_chat(query: str, ticker: str | None):
@@ -92,13 +128,22 @@ async def _stream_chat(query: str, ticker: str | None):
         yield _sse("error", {"detail": str(e)})
         return
 
-    for token in _tokenize(result["answer"]):
-        yield _sse("token", {"token": token})
-        if STREAM_DELAY_SECONDS:
-            await asyncio.sleep(STREAM_DELAY_SECONDS)
+    async for event in _stream_result(result):
+        yield event
 
-    # Sent once, after the full (already-guardrailed) answer has streamed.
-    yield _sse("sources", {"sources": result["sources"]})
+
+async def _stream_chat_general(query: str):
+    try:
+        # Same blocking-call-off-the-event-loop treatment as _stream_chat
+        # above -- answer_general_query() does its own network I/O
+        # (Gemini + yfinance tool calls).
+        result = await asyncio.to_thread(answer_general_query, query)
+    except Exception as e:
+        yield _sse("error", {"detail": str(e)})
+        return
+
+    async for event in _stream_result(result, include_chart=True):
+        yield event
 
 
 @app.post("/chat")
@@ -110,6 +155,15 @@ async def chat(req: ChatRequest):
     )
 
 
+@app.post("/chat/general")
+async def chat_general(req: GeneralChatRequest):
+    return StreamingResponse(
+        _stream_chat_general(req.query),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+app.include_router(thesys_router)
 # ---------------------------------------------------------------------------
 # Serve the built frontend (production only).
 #
