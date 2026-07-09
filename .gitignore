@@ -4,8 +4,7 @@ __pycache__/
 .venv/
 .env
 
-# Frontend (managed separately)
-frontend/
+#frontend
 node_modules/
 dist/
 
