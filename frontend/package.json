@@ -11,12 +11,16 @@
   "dependencies": {
     "@crayonai/react-core": "^0.7.7",
     "@crayonai/react-ui": "^0.9.16",
+    "@crayonai/stream": "^0.6.4",
     "@openuidev/react-headless": "^0.7.11",
     "@thesysai/genui-sdk": "^0.10.3",
+    "eventsource-parser": "^3.1.0",
     "lucide-react": "^0.562.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "recharts": "^3.9.2"
+    "recharts": "^3.9.2",
+    "zod-to-json-schema": "^3.25.2",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
